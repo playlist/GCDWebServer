@@ -221,7 +221,7 @@
   } else {
     NSError* error = nil;
     NSData* data = [_reader readData:&error];
-    block(data, error);
+    block(data, error, nil);
   }
 }
 

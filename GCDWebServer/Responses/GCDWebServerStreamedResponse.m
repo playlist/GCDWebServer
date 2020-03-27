@@ -50,7 +50,7 @@
                   asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock completionBlock) {
                     NSError* error = nil;
                     NSData* data = block(&error);
-                    completionBlock(data, error);
+                    completionBlock(data, error, nil);
                   }];
 }
 

@@ -67,7 +67,7 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 @interface GCDWebServerConnection (Write)
-- (void)writeData:(NSData*)data withCompletionBlock:(WriteDataCompletionBlock)block;
+- (void)writeData:(NSData*)data requestId:(NSString*)requestId withCompletionBlock:(WriteDataCompletionBlock)block;
 - (void)writeHeadersWithCompletionBlock:(WriteHeadersCompletionBlock)block;
 - (void)writeBodyWithCompletionBlock:(WriteBodyCompletionBlock)block;
 @end
@@ -313,7 +313,7 @@ NS_ASSUME_NONNULL_END
                   NSString* expectHeader = [requestHeaders objectForKey:@"Expect"];
                   if (expectHeader) {
                     if ([expectHeader caseInsensitiveCompare:@"100-continue"] == NSOrderedSame) {  // TODO: Actually validate request before continuing
-                      [self writeData:_continueData
+                      [self writeData:_continueData requestId: nil
                           withCompletionBlock:^(BOOL success) {
                             if (success) {
                               if (self->_request.usesChunkedTransferEncoding) {
@@ -568,8 +568,9 @@ static inline NSUInteger _ScanHexNumber(const void* bytes, NSUInteger size) {
 @end
 
 @implementation GCDWebServerConnection (Write)
+NSString * const PLProxyServerWriteFailed = @"com.playlist.PLProxyServerWriteFailed";
 
-- (void)writeData:(NSData*)data withCompletionBlock:(WriteDataCompletionBlock)block {
+- (void)writeData:(NSData*)data requestId:(NSString *)requestId withCompletionBlock:(WriteDataCompletionBlock)block {
   dispatch_data_t buffer = dispatch_data_create(data.bytes, data.length, dispatch_get_global_queue(_server.dispatchQueuePriority, 0), ^{
     [data self];  // Keeps ARC from releasing data too early
   });
@@ -581,6 +582,15 @@ static inline NSUInteger _ScanHexNumber(const void* bytes, NSUInteger size) {
         block(YES);
       } else {
         GWS_LOG_ERROR(@"Error while writing to socket %i: %s (%i)", self->_socket, strerror(error), error);
+        // Playlist: If error is 32, (broken pipe), the client has closed the connection (hopefully). As such, we
+        // inform the CachingProxyServer, which notifies the TrackDownloadManager to shut down the download.
+        if (error == 32) {
+          NSMutableDictionary *userInfo = [NSMutableDictionary new];
+          if (requestId != nil) {
+            userInfo[@"requestId"] = requestId;
+          }
+          [[NSNotificationCenter defaultCenter] postNotificationName:PLProxyServerWriteFailed object:self userInfo:userInfo];
+        }
         block(NO);
       }
     }
@@ -593,13 +603,13 @@ static inline NSUInteger _ScanHexNumber(const void* bytes, NSUInteger size) {
 - (void)writeHeadersWithCompletionBlock:(WriteHeadersCompletionBlock)block {
   GWS_DCHECK(_responseMessage);
   CFDataRef data = CFHTTPMessageCopySerializedMessage(_responseMessage);
-  [self writeData:(__bridge NSData*)data withCompletionBlock:block];
+  [self writeData:(__bridge NSData*)data requestId: nil withCompletionBlock:block];
   CFRelease(data);
 }
 
 - (void)writeBodyWithCompletionBlock:(WriteBodyCompletionBlock)block {
   GWS_DCHECK([_response hasBody]);
-  [_response performReadDataWithCompletion:^(NSData* data, NSError* error) {
+  [_response performReadDataWithCompletion:^(NSData* data, NSError* error, NSString *requestId) {
     if (data) {
       if (data.length) {
         if (self->_response.usesChunkedTransferEncoding) {
@@ -622,7 +632,7 @@ static inline NSUInteger _ScanHexNumber(const void* bytes, NSUInteger size) {
           *ptr = '\n';
           data = chunk;
         }
-        [self writeData:data
+        [self writeData:data requestId: requestId
             withCompletionBlock:^(BOOL success) {
               if (success) {
                 [self writeBodyWithCompletionBlock:block];
@@ -632,7 +642,7 @@ static inline NSUInteger _ScanHexNumber(const void* bytes, NSUInteger size) {
             }];
       } else {
         if (self->_response.usesChunkedTransferEncoding) {
-          [self writeData:_lastChunkData
+          [self writeData:_lastChunkData requestId: requestId
               withCompletionBlock:^(BOOL success) {
                 block(success);
               }];
